@@ -1,0 +1,53 @@
+# --- Project Data & Runtime Artifacts ---
+data_drop/
+uploads/
+*.csv
+celerybeat-schedule
+celerybeat-schedule.*
+celerybeat.pid
+
+# --- Environment Variables & Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python & Virtual Environments ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Django ---
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+media/
+
+# --- Docker & Local Volumes ---
+postgres_data/
+pgdata/
+
+# --- IDEs & Editors (PyCharm / VS Code) ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# --- OS Artifacts (Windows / macOS) ---
+Thumbs.db
+Desktop.ini
+.DS_Store

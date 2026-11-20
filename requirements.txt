@@ -1,0 +1,9 @@
+Django==5.0.14
+djangorestframework
+djangorestframework-simplejwt
+django-environ
+psycopg2-binary
+celery
+redis
+pandas
+packaging
