@@ -76,14 +76,15 @@ TEMPLATES = [
 # 3. DATABASE CONFIGURATION (Hardcoded to fix auth error)
 # ==========================================
 DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('DB_NAME', 'fin_pipeline'),
-        'USER': os.environ.get('DB_USER', 'postgres'),
-        'PASSWORD': os.environ.get('DB_PASSWORD', 'adminpassword'),
-        'HOST': os.environ.get('DB_HOST', 'localhost'),
-        'PORT': os.environ.get('DB_PORT', '5432'),
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("POSTGRES_DB", os.environ.get("DB_NAME", "fin_db")),
+        "USER": os.environ.get("POSTGRES_USER", os.environ.get("DB_USER", "postgres")),
+        "PASSWORD": os.environ.get("POSTGRES_PASSWORD", os.environ.get("DB_PASSWORD", "postgres")),
+        "HOST": os.environ.get("POSTGRES_HOST", os.environ.get("DB_HOST", "db")),
+        "PORT": os.environ.get("POSTGRES_PORT", os.environ.get("DB_PORT", "5432")),
     }
+}
 }
 
 # ==========================================
