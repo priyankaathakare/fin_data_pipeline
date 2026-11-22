@@ -1,173 +1,301 @@
+import csv
 import io
-import os
+import logging
 import shutil
 import time
+import uuid
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
-import pandas as pd
 from celery import shared_task
 from django.conf import settings
-from django.db import connection, transaction
+from django.db import OperationalError, connection, transaction
 from django.utils import timezone
 
+from .cache import invalidate_analytics_cache
 from .models import IngestionJob, TransactionRecord
 
-BASE_DROP_DIR = os.path.join(settings.BASE_DIR, "data_drop")
-INCOMING_DIR = os.path.join(BASE_DROP_DIR, "incoming")
-PROCESSING_DIR = os.path.join(BASE_DROP_DIR, "processing")
-PROCESSED_DIR = os.path.join(BASE_DROP_DIR, "processed")
-FAILED_DIR = os.path.join(BASE_DROP_DIR, "failed")
+logger = logging.getLogger(__name__)
+
+CHUNK_SIZE = 50_000
+
+COPY_COLUMNS = (
+    "transaction_id",
+    "customer_id",
+    "customer_dob",
+    "cust_gender",
+    "cust_location",
+    "cust_account_balance",
+    "transaction_date",
+    "transaction_time",
+    "transaction_amount",
+)
+
+DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%d/%m/%y",
+    "%d/%m/%Y",
+    "%m/%d/%y",
+    "%m/%d/%Y",
+    "%d-%m-%Y",
+)
 
 
-def _ensure_drop_dirs():
-    for path in (INCOMING_DIR, PROCESSING_DIR, PROCESSED_DIR, FAILED_DIR):
-        os.makedirs(path, exist_ok=True)
+def _get_field(row: dict[str, str], *keys: str) -> str:
+    """Return the first non-empty stripped value across candidate CSV headers."""
+    for key in keys:
+        value = row.get(key)
+        if value is not None:
+            cleaned = value.strip()
+            if cleaned and cleaned.lower() != "nan":
+                return cleaned
+    return ""
 
 
-@shared_task
-def scan_incoming_folder():
-    """Scheduled task: scans incoming/ for CSVs and dispatches tracked ingestion jobs."""
-    _ensure_drop_dirs()
-    dispatched = []
-
-    for filename in os.listdir(INCOMING_DIR):
-        if not filename.lower().endswith(".csv"):
+def _parse_date(value: str) -> str:
+    """Normalize supported date strings to ISO YYYY-MM-DD for PostgreSQL COPY."""
+    if not value:
+        return ""
+    for fmt in DATE_FORMATS:
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
             continue
+    return ""
 
-        src_path = os.path.join(INCOMING_DIR, filename)
-        if not os.path.isfile(src_path):
-            continue
 
-        processing_path = os.path.join(PROCESSING_DIR, filename)
-        shutil.move(src_path, processing_path)
+def _parse_decimal(value: str) -> str:
+    """Validate decimal values; return empty string (NULL) for malformed entries."""
+    if not value:
+        return ""
+    try:
+        return str(Decimal(value))
+    except InvalidOperation:
+        return ""
 
+
+def _archive_drop_zone_file(csv_path: Path, subfolder: str) -> None:
+    """Move drop-zone files out of processing/ into processed/ or failed/."""
+    if csv_path.parent.name != "processing" or not csv_path.exists():
+        return
+    archive_dir = csv_path.parent.parent / subfolder
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(csv_path), str(archive_dir / csv_path.name))
+
+
+@shared_task(bind=True, max_retries=3)
+def process_csv_file(self, file_path: str, job_id: str | None = None) -> dict:
+    """
+    Bulk-load a CSV file into PostgreSQL via a TEMP staging table + COPY,
+    upsert idempotently into TransactionRecord, update IngestionJob metrics,
+    and invalidate cached analytics responses.
+    """
+    csv_path = Path(file_path)
+    start_time = time.perf_counter()
+
+    if job_id:
+        job = IngestionJob.objects.get(job_id=job_id)
+    else:
         job = IngestionJob.objects.create(
-            file_name=filename,
+            file_name=csv_path.name,
             source="AUTO_DROP",
             status="PENDING",
         )
-        process_financial_csv.delay(processing_path, str(job.job_id))
-        dispatched.append(f"{filename} ({job.job_id})")
 
-    if dispatched:
-        return f"Dispatched {len(dispatched)} job(s): {', '.join(dispatched)}"
-    return "No new CSV files found."
+    job.status = "PROCESSING"
+    job.error_message = None
+    job.save(update_fields=["status", "error_message"])
+
+    target_table = TransactionRecord._meta.db_table
+    staging_table = f"tmp_tx_staging_{job.job_id.hex[:12]}"
+    col_list = ", ".join(COPY_COLUMNS)
+    copy_sql = f"COPY {staging_table} ({col_list}) FROM STDIN WITH (FORMAT CSV, NULL '');"
+
+    total_rows = 0
+    inserted_rows = 0
+
+    try:
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+        with (
+            csv_path.open("r", encoding="utf-8-sig", newline="") as csv_file,
+            transaction.atomic(),
+            connection.cursor() as cursor,
+        ):
+            # Omit constraints on temp table so intra-file duplicates don't abort COPY
+            cursor.execute(
+                f"CREATE TEMP TABLE {staging_table} "
+                f"(LIKE {target_table} INCLUDING DEFAULTS) ON COMMIT DROP;"
+            )
+
+            reader = csv.DictReader(csv_file)
+            buffer = io.StringIO()
+            writer = csv.writer(buffer)
+            chunk_count = 0
+
+            for row in reader:
+                tx_id = _get_field(row, "TransactionID", "transaction_id")
+                cust_id = _get_field(row, "CustomerID", "customer_id")
+                if not tx_id or not cust_id:
+                    continue
+
+                writer.writerow(
+                    [
+                        tx_id,
+                        cust_id,
+                        _get_field(row, "CustomerDOB", "customer_dob"),
+                        _get_field(row, "CustGender", "cust_gender").upper(),
+                        _get_field(row, "CustLocation", "cust_location").upper(),
+                        _parse_decimal(
+                            _get_field(row, "CustAccountBalance", "cust_account_balance")
+                        ),
+                        _parse_date(
+                            _get_field(row, "TransactionDate", "transaction_date")
+                        ),
+                        _get_field(row, "TransactionTime", "transaction_time"),
+                        _parse_decimal(
+                            _get_field(
+                                row,
+                                "TransactionAmount (INR)",
+                                "TransactionAmount",
+                                "transaction_amount",
+                            )
+                        ),
+                    ]
+                )
+                total_rows += 1
+                chunk_count += 1
+
+                if chunk_count >= CHUNK_SIZE:
+                    buffer.seek(0)
+                    cursor.copy_expert(copy_sql, buffer)
+                    buffer = io.StringIO()
+                    writer = csv.writer(buffer)
+                    chunk_count = 0
+
+            if chunk_count > 0:
+                buffer.seek(0)
+                cursor.copy_expert(copy_sql, buffer)
+
+            cursor.execute(
+                f"INSERT INTO {target_table} ({col_list}) "
+                f"SELECT DISTINCT ON (transaction_id) {col_list} "
+                f"FROM {staging_table} "
+                f"ON CONFLICT (transaction_id) DO NOTHING;"
+            )
+            inserted_rows = cursor.rowcount
+
+        elapsed = round(time.perf_counter() - start_time, 3)
+        job.status = "COMPLETED"
+        job.total_rows = total_rows
+        job.processing_time_seconds = elapsed
+        job.completed_at = timezone.now()
+        job.save(
+            update_fields=[
+                "status",
+                "total_rows",
+                "processing_time_seconds",
+                "completed_at",
+            ]
+        )
+
+        # Invalidate Redis analytics cache so fresh totals are served immediately
+        invalidate_analytics_cache()
+        _archive_drop_zone_file(csv_path, "processed")
+
+        logger.info(
+            "IngestionJob %s completed: %s rows staged, %s new rows inserted in %ss.",
+            job.job_id,
+            total_rows,
+            inserted_rows,
+            elapsed,
+        )
+        return {
+            "job_id": str(job.job_id),
+            "status": job.status,
+            "total_rows": total_rows,
+            "inserted_rows": inserted_rows,
+            "processing_time_seconds": elapsed,
+        }
+
+    except OperationalError as exc:
+        if self.request.retries < self.max_retries:
+            countdown = 2**self.request.retries * 5
+            logger.warning(
+                "Transient DB error on job %s; retrying in %ss (%s/%s): %s",
+                job.job_id,
+                countdown,
+                self.request.retries + 1,
+                self.max_retries,
+                exc,
+            )
+            raise self.retry(exc=exc, countdown=countdown) from exc
+
+        elapsed = round(time.perf_counter() - start_time, 3)
+        job.status = "FAILED"
+        job.processing_time_seconds = elapsed
+        job.error_message = str(exc)
+        job.completed_at = timezone.now()
+        job.save(
+            update_fields=[
+                "status",
+                "processing_time_seconds",
+                "error_message",
+                "completed_at",
+            ]
+        )
+        _archive_drop_zone_file(csv_path, "failed")
+        logger.exception("IngestionJob %s failed after max retries.", job.job_id)
+        raise
+
+    except Exception as exc:
+        elapsed = round(time.perf_counter() - start_time, 3)
+        job.status = "FAILED"
+        job.processing_time_seconds = elapsed
+        job.error_message = str(exc)
+        job.completed_at = timezone.now()
+        job.save(
+            update_fields=[
+                "status",
+                "processing_time_seconds",
+                "error_message",
+                "completed_at",
+            ]
+        )
+        _archive_drop_zone_file(csv_path, "failed")
+        logger.exception("IngestionJob %s failed.", job.job_id)
+        raise
 
 
 @shared_task
-def process_financial_csv(file_path, job_id=None):
-    _ensure_drop_dirs()
-    start_time = time.time()
+def scan_drop_zone() -> dict:
+    """
+    Celery Beat task: detect new CSV files in DATA_DROP_DIR, move them atomically
+    to processing/ to prevent double-queuing, and dispatch process_csv_file jobs.
+    """
+    drop_dir = Path(getattr(settings, "DATA_DROP_DIR", settings.BASE_DIR / "data_drop"))
+    processing_dir = drop_dir / "processing"
+    drop_dir.mkdir(parents=True, exist_ok=True)
+    processing_dir.mkdir(parents=True, exist_ok=True)
 
-    job = IngestionJob.objects.filter(job_id=job_id).first() if job_id else None
-    if job:
-        job.status = "PROCESSING"
-        job.save(update_fields=["status"])
+    queued_jobs = []
+    for csv_file in sorted(drop_dir.glob("*.csv")):
+        if not csv_file.is_file():
+            continue
 
-    target_table = TransactionRecord._meta.db_table
-    staging_table = "staging_transactions"
+        staged_name = f"{uuid.uuid4().hex}_{csv_file.name}"
+        staged_path = processing_dir / staged_name
+        shutil.move(str(csv_file), str(staged_path))
 
-    db_columns = [
-        "transaction_id",
-        "customer_id",
-        "customer_dob",
-        "cust_gender",
-        "cust_location",
-        "cust_account_balance",
-        "transaction_date",
-        "transaction_time",
-        "transaction_amount",
-    ]
-    col_list = ", ".join(db_columns)
+        job = IngestionJob.objects.create(
+            file_name=csv_file.name,
+            source="AUTO_DROP",
+            status="PENDING",
+        )
+        process_csv_file.delay(str(staged_path), str(job.job_id))
+        queued_jobs.append(str(job.job_id))
+        logger.info("Queued drop-zone file %s as IngestionJob %s.", csv_file.name, job.job_id)
 
-    csv_to_db_map = {
-        "TransactionID": "transaction_id",
-        "CustomerID": "customer_id",
-        "CustomerDOB": "customer_dob",
-        "CustGender": "cust_gender",
-        "CustLocation": "cust_location",
-        "CustAccountBalance": "cust_account_balance",
-        "TransactionDate": "transaction_date",
-        "TransactionTime": "transaction_time",
-        "TransactionAmount (INR)": "transaction_amount",
-    }
-
-    total_processed = 0
-    is_drop_zone_file = (
-        os.path.dirname(os.path.abspath(file_path)) == os.path.abspath(PROCESSING_DIR)
-    )
-
-    try:
-        with transaction.atomic(), connection.cursor() as cursor:
-                cursor.execute(
-                    f"CREATE TEMP TABLE {staging_table} (LIKE {target_table}) ON COMMIT DROP;"
-                )
-
-                for chunk in pd.read_csv(file_path, chunksize=50000):
-                    chunk = chunk.rename(columns=csv_to_db_map)[db_columns]
-                    chunk["transaction_date"] = pd.to_datetime(
-                        chunk["transaction_date"], format="%d/%m/%y", errors="coerce"
-                    ).dt.strftime("%Y-%m-%d")
-
-                    buffer = io.StringIO()
-                    chunk.to_csv(buffer, index=False, header=False, na_rep="")
-                    buffer.seek(0)
-
-                    copy_sql = (
-                        f"COPY {staging_table} ({col_list}) "
-                        f"FROM STDIN WITH (FORMAT CSV, NULL '');"
-                    )
-                    cursor.copy_expert(copy_sql, buffer)
-
-                    cursor.execute(
-                        f"""
-                        INSERT INTO {target_table} ({col_list})
-                        SELECT {col_list} FROM {staging_table}
-                        ON CONFLICT (transaction_id) DO NOTHING;
-                        """
-                    )
-                    cursor.execute(f"TRUNCATE TABLE {staging_table};")
-                    total_processed += len(chunk)
-
-        if is_drop_zone_file:
-            shutil.move(
-                file_path, os.path.join(PROCESSED_DIR, os.path.basename(file_path))
-            )
-
-        elapsed = round(time.time() - start_time, 2)
-
-        if job:
-            job.status = "COMPLETED"
-            job.total_rows = total_processed
-            job.processing_time_seconds = elapsed
-            job.completed_at = timezone.now()
-            job.save(
-                update_fields=[
-                    "status",
-                    "total_rows",
-                    "processing_time_seconds",
-                    "completed_at",
-                ]
-            )
-
-        return f"Processed {total_processed} rows via PostgreSQL COPY in {elapsed}s"
-
-    except Exception as exc:
-        if is_drop_zone_file and os.path.exists(file_path):
-            shutil.move(
-                file_path, os.path.join(FAILED_DIR, os.path.basename(file_path))
-            )
-
-        if job:
-            job.status = "FAILED"
-            job.error_message = str(exc)
-            job.processing_time_seconds = round(time.time() - start_time, 2)
-            job.completed_at = timezone.now()
-            job.save(
-                update_fields=[
-                    "status",
-                    "error_message",
-                    "processing_time_seconds",
-                    "completed_at",
-                ]
-            )
-        raise
+    return {"queued_count": len(queued_jobs), "job_ids": queued_jobs}
