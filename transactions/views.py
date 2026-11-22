@@ -7,6 +7,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.pagination import PageNumberPagination
+from drf_spectacular.utils import extend_schema, OpenApiParameter
+from drf_spectacular.types import OpenApiTypes
 
 from .models import TransactionRecord, IngestionJob
 from .serializers import TransactionRecordSerializer, IngestionJobSerializer
@@ -63,7 +65,18 @@ class TransactionUploadView(APIView):
             },
             status=status.HTTP_202_ACCEPTED,
         )
-
+@extend_schema(
+    summary="List and filter financial transactions",
+    parameters=[
+        OpenApiParameter("customer_id", OpenApiTypes.STR, description="Exact Customer ID (e.g. C5841053)"),
+        OpenApiParameter("location", OpenApiTypes.STR, description="Customer city (e.g. MUMBAI)"),
+        OpenApiParameter("gender", OpenApiTypes.STR, description="Gender code (M / F)"),
+        OpenApiParameter("min_amount", OpenApiTypes.DECIMAL, description="Minimum transaction amount"),
+        OpenApiParameter("max_amount", OpenApiTypes.DECIMAL, description="Maximum transaction amount"),
+        OpenApiParameter("start_date", OpenApiTypes.DATE, description="Start date (YYYY-MM-DD)"),
+        OpenApiParameter("end_date", OpenApiTypes.DATE, description="End date (YYYY-MM-DD)"),
+    ],
+)
 
 class TransactionListView(generics.ListAPIView):
     serializer_class = TransactionRecordSerializer

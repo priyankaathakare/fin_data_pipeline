@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     # Third-Party Apps
     'rest_framework',
     'rest_framework_simplejwt',
+    "drf_spectacular",
 
     # Local Apps
     'transactions',
@@ -104,8 +105,16 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticated',
     ),
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 100,
+}
+SPECTACULAR_SETTINGS = {
+    "TITLE": "Financial Data Pipeline API",
+    "DESCRIPTION": "High-throughput CSV ingestion, PostgreSQL COPY ETL, and transaction audit API.",
+    "VERSION": "1.0.0",
+    "SERVE_INCLUDE_SCHEMA": False,
+    "COMPONENT_SPLIT_REQUEST": True,
 }
 
 SIMPLE_JWT = {
