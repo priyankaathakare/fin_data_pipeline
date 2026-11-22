@@ -33,3 +33,18 @@ class IngestionJobSerializer(serializers.ModelSerializer):
             "created_at",
             "completed_at",
         ]
+
+
+class TransactionAnalyticsSerializer(serializers.Serializer):
+    group = serializers.CharField()
+    transaction_count = serializers.IntegerField()
+    total_transaction_volume = serializers.DecimalField(
+        max_digits=18,
+        decimal_places=2,
+        allow_null=True,
+    )
+    avg_account_balance = serializers.DecimalField(
+        max_digits=15,
+        decimal_places=2,
+        allow_null=True,
+    )
