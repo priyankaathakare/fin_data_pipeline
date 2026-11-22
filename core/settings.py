@@ -85,7 +85,7 @@ DATABASES = {
         "PORT": os.environ.get("POSTGRES_PORT", os.environ.get("DB_PORT", "5432")),
     }
 }
-}
+
 
 # ==========================================
 # 4. CELERY & REDIS CONFIGURATION
