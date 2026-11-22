@@ -1,17 +1,18 @@
 import os
 import uuid
-from django.conf import settings
-from rest_framework import status, generics
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.parsers import MultiPartParser, FormParser
-from rest_framework.pagination import PageNumberPagination
-from drf_spectacular.utils import extend_schema, OpenApiParameter
-from drf_spectacular.types import OpenApiTypes
 
-from .models import TransactionRecord, IngestionJob
-from .serializers import TransactionRecordSerializer, IngestionJobSerializer
+from django.conf import settings
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import OpenApiParameter, extend_schema
+from rest_framework import generics, status
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from .models import IngestionJob, TransactionRecord
+from .serializers import IngestionJobSerializer, TransactionRecordSerializer
 from .tasks import process_financial_csv
 
 
@@ -46,8 +47,7 @@ class TransactionUploadView(APIView):
         file_path = os.path.join(upload_dir, unique_filename)
 
         with open(file_path, "wb+") as destination:
-            for chunk in uploaded_file.chunks():
-                destination.write(chunk)
+            destination.writelines(uploaded_file.chunks())
 
         job = IngestionJob.objects.create(
             file_name=uploaded_file.name,

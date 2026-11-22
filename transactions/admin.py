@@ -1,5 +1,6 @@
 from django.contrib import admin
-from .models import TransactionRecord, IngestionJob
+
+from .models import IngestionJob, TransactionRecord
 
 
 @admin.register(TransactionRecord)

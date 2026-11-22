@@ -1,5 +1,6 @@
 from rest_framework import serializers
-from .models import TransactionRecord, IngestionJob
+
+from .models import IngestionJob, TransactionRecord
 
 
 class TransactionRecordSerializer(serializers.ModelSerializer):

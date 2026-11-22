@@ -2,13 +2,14 @@ import io
 import os
 import shutil
 import time
+
 import pandas as pd
 from celery import shared_task
 from django.conf import settings
 from django.db import connection, transaction
 from django.utils import timezone
-from .models import TransactionRecord, IngestionJob
 
+from .models import IngestionJob, TransactionRecord
 
 BASE_DROP_DIR = os.path.join(settings.BASE_DIR, "data_drop")
 INCOMING_DIR = os.path.join(BASE_DROP_DIR, "incoming")
@@ -96,8 +97,7 @@ def process_financial_csv(file_path, job_id=None):
     )
 
     try:
-        with transaction.atomic():
-            with connection.cursor() as cursor:
+        with transaction.atomic(), connection.cursor() as cursor:
                 cursor.execute(
                     f"CREATE TEMP TABLE {staging_table} (LIKE {target_table}) ON COMMIT DROP;"
                 )

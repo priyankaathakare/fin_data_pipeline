@@ -1,9 +1,10 @@
 from django.urls import path
+
 from .views import (
-    TransactionUploadView,
-    TransactionListView,
-    IngestionJobListView,
     IngestionJobDetailView,
+    IngestionJobListView,
+    TransactionListView,
+    TransactionUploadView,
 )
 
 urlpatterns = [

@@ -1,0 +1,9 @@
+exclude = [
+    "**/migrations/**",
+    ".venv",
+]
+
+[lint]
+ignore = [
+    "RUF012",  # Mutable class attributes are standard in Django/DRF (Meta.fields, permission_classes, etc.)
+]
