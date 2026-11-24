@@ -3,6 +3,7 @@ from django.urls import path
 from .views import (
     IngestionJobDetailView,
     IngestionJobListView,
+    TransactionAnalyticsView,
     TransactionListView,
     TransactionUploadView,
 )
@@ -15,5 +16,10 @@ urlpatterns = [
         "jobs/<uuid:job_id>/",
         IngestionJobDetailView.as_view(),
         name="ingestion-job-detail",
+    ),
+    path(
+        "analytics/",
+        TransactionAnalyticsView.as_view(),
+        name="transaction-analytics",
     ),
 ]

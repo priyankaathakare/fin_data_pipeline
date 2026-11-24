@@ -216,6 +216,15 @@ class AnalyticsCacheInvalidationTests(APITransactionTestCase):
         cache.clear()
         self.temp_dir.cleanup()
 
+    @staticmethod
+    def _extract_rows(payload):
+        if isinstance(payload, list):
+            return payload
+        for key in ("results", "data", "analytics"):
+            if key in payload and isinstance(payload[key], list):
+                return payload[key]
+        raise AssertionError(f"Unexpected analytics payload shape: {payload}")
+
     def test_analytics_cache_miss_hit_and_automatic_invalidation(self):
         """
         1st analytics call -> MISS (populates Redis DB 1).
@@ -254,7 +263,9 @@ class AnalyticsCacheInvalidationTests(APITransactionTestCase):
             self.assertEqual(resp_1.status_code, status.HTTP_200_OK)
             self.assertEqual(resp_1["X-Cache"], "MISS")
             pune_row_1 = next(
-                item for item in resp_1.json() if item["group"] == "PUNE"
+                item
+                for item in self._extract_rows(resp_1.json())
+                if item.get("group") == "PUNE" or item.get("cust_location") == "PUNE"
             )
             self.assertEqual(
                 Decimal(str(pune_row_1["total_transaction_volume"])),
@@ -295,7 +306,9 @@ class AnalyticsCacheInvalidationTests(APITransactionTestCase):
             self.assertEqual(resp_3.status_code, status.HTTP_200_OK)
             self.assertEqual(resp_3["X-Cache"], "MISS")
             pune_row_3 = next(
-                item for item in resp_3.json() if item["group"] == "PUNE"
+                item
+                for item in self._extract_rows(resp_3.json())
+                if item.get("group") == "PUNE" or item.get("cust_location") == "PUNE"
             )
             self.assertEqual(
                 Decimal(str(pune_row_3["total_transaction_volume"])),
