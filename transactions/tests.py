@@ -6,6 +6,7 @@ from pathlib import Path
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TransactionTestCase, override_settings
+from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITransactionTestCase
 
@@ -319,3 +320,90 @@ class AnalyticsCacheInvalidationTests(APITransactionTestCase):
             resp_4 = self.client.get(url)
             self.assertEqual(resp_4.status_code, status.HTTP_200_OK)
             self.assertEqual(resp_4["X-Cache"], "HIT")
+
+
+class JWTAuthenticationAndDocsTests(APITransactionTestCase):
+    """Verify JWT login, refresh rotation/blacklisting, 401 enforcement, and public docs."""
+
+    def setUp(self):
+        self.username = "jwt_auditor"
+        self.password = "StrongBankPass123!"
+        user_model = get_user_model()
+        self.user = user_model.objects.create_user(
+            username=self.username,
+            password=self.password,
+        )
+        self.token_url = reverse("token_obtain_pair")
+        self.refresh_url = reverse("token_refresh")
+        self.analytics_url = "/api/transactions/analytics/?group_by=location"
+        self.docs_url = reverse("swagger-ui")
+        self.schema_url = reverse("schema")
+
+    def test_unauthenticated_request_to_protected_endpoint_returns_401(self):
+        """Protected API endpoints must reject requests without a valid Bearer token."""
+        response = self.client.get(self.analytics_url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_jwt_obtain_and_authenticated_access(self):
+        """Valid credentials return access + refresh tokens that unlock protected routes."""
+        token_resp = self.client.post(
+            self.token_url,
+            {"username": self.username, "password": self.password},
+            format="json",
+        )
+        self.assertEqual(token_resp.status_code, status.HTTP_200_OK)
+        self.assertIn("access", token_resp.data)
+        self.assertIn("refresh", token_resp.data)
+
+        access_token = token_resp.data["access"]
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {access_token}")
+
+        analytics_resp = self.client.get(self.analytics_url)
+        self.assertEqual(analytics_resp.status_code, status.HTTP_200_OK)
+
+    def test_refresh_token_rotation_and_blacklist_replay_rejection(self):
+        """
+        Refreshing issues a new access + refresh pair and blacklists the old refresh token.
+        Replaying the old refresh token must fail with 401 Unauthorized.
+        """
+        token_resp = self.client.post(
+            self.token_url,
+            {"username": self.username, "password": self.password},
+            format="json",
+        )
+        self.assertEqual(token_resp.status_code, status.HTTP_200_OK)
+        old_refresh = token_resp.data["refresh"]
+
+        # 1st refresh: succeeds and rotates the refresh token
+        refresh_resp = self.client.post(
+            self.refresh_url,
+            {"refresh": old_refresh},
+            format="json",
+        )
+        self.assertEqual(refresh_resp.status_code, status.HTTP_200_OK)
+        self.assertIn("access", refresh_resp.data)
+        self.assertIn("refresh", refresh_resp.data)
+        self.assertNotEqual(refresh_resp.data["refresh"], old_refresh)
+
+        # New access token works immediately
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {refresh_resp.data['access']}"
+        )
+        analytics_resp = self.client.get(self.analytics_url)
+        self.assertEqual(analytics_resp.status_code, status.HTTP_200_OK)
+
+        # Replaying the rotated (blacklisted) refresh token must be rejected
+        replay_resp = self.client.post(
+            self.refresh_url,
+            {"refresh": old_refresh},
+            format="json",
+        )
+        self.assertEqual(replay_resp.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_swagger_docs_and_schema_are_publicly_accessible(self):
+        """Swagger UI (/api/docs/) and OpenAPI schema (/api/schema/) return 200 without auth."""
+        docs_resp = self.client.get(self.docs_url)
+        self.assertEqual(docs_resp.status_code, status.HTTP_200_OK)
+
+        schema_resp = self.client.get(self.schema_url)
+        self.assertEqual(schema_resp.status_code, status.HTTP_200_OK)
