@@ -10,9 +10,10 @@ from drf_spectacular.utils import OpenApiParameter, extend_schema, inline_serial
 from rest_framework import generics, serializers, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, MultiPartParser
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .cache import ANALYTICS_CACHE_TTL, get_analytics_cache_version
 from .models import IngestionJob, TransactionRecord
@@ -20,6 +21,7 @@ from .serializers import (
     IngestionJobSerializer,
     TransactionAnalyticsSerializer,
     TransactionRecordSerializer,
+    UserRegistrationSerializer,
 )
 from .tasks import process_csv_file
 
@@ -43,6 +45,7 @@ class TransactionUploadView(APIView):
                     "file": {"type": "string", "format": "binary"},
                 },
                 "required": ["file"],
+
             }
         },
         responses={
@@ -303,3 +306,31 @@ class IngestionJobDetailView(generics.RetrieveAPIView):
     serializer_class = IngestionJobSerializer
     permission_classes = [IsAuthenticated]
     lookup_field = "job_id"
+
+
+
+class UserRegistrationView(generics.CreateAPIView):
+    """Public signup endpoint that creates a user and returns a fresh JWT pair."""
+
+    serializer_class = UserRegistrationSerializer
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                },
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+            },
+            status=status.HTTP_201_CREATED,
+        )

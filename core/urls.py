@@ -8,8 +8,11 @@ from rest_framework_simplejwt.views import (
     TokenVerifyView,
 )
 
+from transactions.views import UserRegistrationView
+
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/auth/register/", UserRegistrationView.as_view(), name="auth_register"),
     path("api/token/", TokenObtainPairView.as_view(), name="token_obtain_pair"),
     path("api/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
     path("api/token/verify/", TokenVerifyView.as_view(), name="token_verify"),
